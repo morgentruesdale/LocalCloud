@@ -1,36 +1,79 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# LocalCloud
 
-## Getting Started
+A local network, self-hosted file transfer server that is vastly more efficient and intuitive than network folder sharing for the average user. 
+Run it on one machine and any other device on the same network can upload and download files through a browser. No accounts, no internet, no installation on the other devices.
 
-First, run the development server:
+The server holds files in memory for the duration of the session only. Obviously this can quickly use a lot of memory, best practice is closing the server after use. 
+If you want to keep it running in the background, you'll have to implement a time period buffer clear.
+
+## Features
+
+**Transfers**
+- Upload files by dragging and dropping onto the page, or clicking to browse
+- Multiple files can be uploaded at once
+- Any device on the network can download any file independently
+- Delete individual files from the server
+
+**Real-time**
+- Every connected device sees uploads and deletions instantly via Server-Sent Events. No refresh needed
+- A live/connecting indicator shows whether the connection to the server is active
+
+**Session-scoped storage**
+- Files are held in memory only and are never written to disk on the host machine
+- Very large file transfers are automatically denied to avoid overloading memory
+- All files are gone when the server stops. Nothing is cached or persisted between sessions
+
+**Network**
+- The dashboard header displays the exact URL other devices should open in their browser
+- The host's primary LAN IPv4 address is detected automatically
+
+**File list**
+- Shows filename, size, uploader IP, and time since upload for each file
+- File type is indicated by colour (image, video, audio, text, other)
+
+## Development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev -- --hostname 0.0.0.0
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000` on the host machine. Other devices on the network connect using the URL shown in the top-right corner of the dashboard.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Production build
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run build
+npm start -- --hostname 0.0.0.0
+```
 
-## Learn More
+## Distributable package
 
-To learn more about Next.js, take a look at the following resources:
+To produce a self-contained folder that can be run on any machine with Node.js installed:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm run package
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+This outputs a `dist/` folder containing the compiled server and all assets. Copy the folder anywhere and launch it:
 
-## Deploy on Vercel
+- **Windows:** double-click `start.bat`
+- **PowerShell:** run `start.ps1`
+- **Any platform:** `node server.js`
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The server binds to `0.0.0.0:3000` by default. Set the `PORT` environment variable to use a different port.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The default per-file size limit is **500 MB**. Override it with the `MAX_FILE_SIZE_MB` environment variable:
+
+```bash
+MAX_FILE_SIZE_MB=2048 node server.js
+```
+
+## Local dev config
+
+Create `local.env.ts` in the project root to allow cross-origin requests from your device during development:
+
+```ts
+const LOCAL_DEV_IP = '192.168.x.x'
+export default LOCAL_DEV_IP
+```
