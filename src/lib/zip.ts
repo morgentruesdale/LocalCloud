@@ -1,13 +1,19 @@
+import { createReadStream } from 'fs'
 import * as zlib from 'zlib'
 import type { StoredFile } from './file-store'
 
 /**
- * Minimal ZIP writer for the in-memory file store.
+ * Minimal ZIP writer for the file store.
  *
  * Entries are stored uncompressed (method 0) because most transferred files are
  * already compressed and the LAN is faster than the CPU would be. Storing also
- * means every size is known before a byte is written, so the response can carry
- * a real Content-Length and browsers show accurate download progress.
+ * means every size is known from the metadata before a byte is read, so the
+ * response carries a real Content-Length and browsers show accurate progress.
+ *
+ * Bodies are streamed off disk a chunk at a time, so an archive of 40 GB costs
+ * the same memory as an archive of 40 MB. That rules out knowing an entry's CRC
+ * before its header is written, so each entry carries a trailing data
+ * descriptor (general-purpose flag bit 3) with the CRC computed while streaming.
  *
  * ZIP64 records are emitted only when an entry, an offset, or the archive
  * exceeds the 32-bit limits.
@@ -21,12 +27,17 @@ const CENTRAL_HEADER = 46
 const EOCD = 22
 const ZIP64_EOCD = 56
 const ZIP64_LOCATOR = 20
+const ZIP64_EXTRA = 20
+const DESCRIPTOR = 16
+const DESCRIPTOR_ZIP64 = 24
+
+const FLAGS = 0x0808 // UTF-8 filename + trailing data descriptor
 
 const CHUNK_SIZE = 1024 * 1024
 
 interface Entry {
   nameBytes: Buffer
-  buffer: Buffer
+  path: string
   size: number
   dosTime: number
   dosDate: number
@@ -52,13 +63,22 @@ export function createZipStream(files: StoredFile[]): {
   const chunks = zipChunks(plan)
 
   const stream = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      const { value, done } = chunks.next()
-      if (done) {
-        controller.close()
-      } else {
-        controller.enqueue(value)
+    async pull(controller) {
+      try {
+        const { value, done } = await chunks.next()
+        if (done) {
+          controller.close()
+        } else {
+          controller.enqueue(value)
+        }
+      } catch (err) {
+        // Most likely a file deleted while its archive was still streaming.
+        // Content-Length is already committed, so the download cannot recover.
+        controller.error(err)
       }
+    },
+    cancel() {
+      void chunks.return(undefined)
     },
   })
 
@@ -72,14 +92,13 @@ function planArchive(files: StoredFile[]): Plan {
 
   for (const file of files) {
     const nameBytes = Buffer.from(uniqueName(safeName(file.name), used), 'utf8')
-    const size = file.buffer.length
-    const localZip64 = size >= U32_MAX
+    const localZip64 = file.size >= U32_MAX
     const { time, date } = dosDateTime(file.uploadedAt)
 
     entries.push({
       nameBytes,
-      buffer: file.buffer,
-      size,
+      path: file.path,
+      size: file.size,
       dosTime: time,
       dosDate: date,
       offset,
@@ -88,7 +107,12 @@ function planArchive(files: StoredFile[]): Plan {
       crc: 0,
     })
 
-    offset += LOCAL_HEADER + nameBytes.length + (localZip64 ? 20 : 0) + size
+    offset +=
+      LOCAL_HEADER +
+      nameBytes.length +
+      (localZip64 ? ZIP64_EXTRA : 0) +
+      file.size +
+      (localZip64 ? DESCRIPTOR_ZIP64 : DESCRIPTOR)
   }
 
   const cdOffset = offset
@@ -108,13 +132,31 @@ function planArchive(files: StoredFile[]): Plan {
   return { entries, cdOffset, cdSize, zip64, totalSize }
 }
 
-function* zipChunks(plan: Plan): Generator<Uint8Array> {
+async function* zipChunks(plan: Plan): AsyncGenerator<Uint8Array> {
   for (const entry of plan.entries) {
-    entry.crc = crc32(entry.buffer)
     yield localHeader(entry)
-    for (let i = 0; i < entry.size; i += CHUNK_SIZE) {
-      yield entry.buffer.subarray(i, Math.min(i + CHUNK_SIZE, entry.size))
+
+    let crc = 0
+    let written = 0
+
+    for await (const chunk of createReadStream(entry.path, { highWaterMark: CHUNK_SIZE })) {
+      const bytes = chunk as Buffer
+      crc = crc32(bytes, crc)
+      written += bytes.length
+      yield bytes
     }
+
+    // Content-Length was derived from the recorded size; if the file on disk no
+    // longer matches, fail loudly rather than emit a corrupt archive.
+    if (written !== entry.size) {
+      throw new Error(
+        `"${entry.nameBytes.toString('utf8')}" changed size while archiving ` +
+          `(expected ${entry.size} bytes, read ${written})`,
+      )
+    }
+
+    entry.crc = crc
+    yield dataDescriptor(entry)
   }
 
   for (const entry of plan.entries) {
@@ -130,28 +172,48 @@ function* zipChunks(plan: Plan): Generator<Uint8Array> {
 }
 
 function localHeader(entry: Entry): Buffer {
-  const extraSize = entry.localZip64 ? 20 : 0
+  const extraSize = entry.localZip64 ? ZIP64_EXTRA : 0
   const buf = Buffer.alloc(LOCAL_HEADER + entry.nameBytes.length + extraSize)
 
   buf.writeUInt32LE(0x04034b50, 0)
   buf.writeUInt16LE(entry.localZip64 ? 45 : 20, 4) // version needed
-  buf.writeUInt16LE(0x0800, 6) // flags: UTF-8 filename
+  buf.writeUInt16LE(FLAGS, 6)
   buf.writeUInt16LE(0, 8) // method: stored
   buf.writeUInt16LE(entry.dosTime, 10)
   buf.writeUInt16LE(entry.dosDate, 12)
-  buf.writeUInt32LE(entry.crc, 14)
-  buf.writeUInt32LE(entry.localZip64 ? U32_MAX : entry.size, 18) // compressed
-  buf.writeUInt32LE(entry.localZip64 ? U32_MAX : entry.size, 22) // uncompressed
+  // CRC and sizes are unknown until the body has streamed; flag bit 3 tells the
+  // reader to take them from the descriptor that follows the data.
+  buf.writeUInt32LE(0, 14)
+  buf.writeUInt32LE(0, 18)
+  buf.writeUInt32LE(0, 22)
   buf.writeUInt16LE(entry.nameBytes.length, 26)
   buf.writeUInt16LE(extraSize, 28)
   entry.nameBytes.copy(buf, LOCAL_HEADER)
 
   if (entry.localZip64) {
+    // Present purely to signal 8-byte size fields in the descriptor.
     const at = LOCAL_HEADER + entry.nameBytes.length
     buf.writeUInt16LE(0x0001, at)
     buf.writeUInt16LE(16, at + 2)
-    buf.writeBigUInt64LE(BigInt(entry.size), at + 4)
-    buf.writeBigUInt64LE(BigInt(entry.size), at + 12)
+    buf.writeBigUInt64LE(BigInt(0), at + 4)
+    buf.writeBigUInt64LE(BigInt(0), at + 12)
+  }
+
+  return buf
+}
+
+function dataDescriptor(entry: Entry): Buffer {
+  const buf = Buffer.alloc(entry.localZip64 ? DESCRIPTOR_ZIP64 : DESCRIPTOR)
+
+  buf.writeUInt32LE(0x08074b50, 0)
+  buf.writeUInt32LE(entry.crc, 4)
+
+  if (entry.localZip64) {
+    buf.writeBigUInt64LE(BigInt(entry.size), 8) // compressed
+    buf.writeBigUInt64LE(BigInt(entry.size), 16) // uncompressed
+  } else {
+    buf.writeUInt32LE(entry.size, 8)
+    buf.writeUInt32LE(entry.size, 12)
   }
 
   return buf
@@ -166,7 +228,7 @@ function centralHeader(entry: Entry): Buffer {
   buf.writeUInt32LE(0x02014b50, 0)
   buf.writeUInt16LE(entry.centralZip64 ? 45 : 20, 4) // version made by
   buf.writeUInt16LE(entry.centralZip64 ? 45 : 20, 6) // version needed
-  buf.writeUInt16LE(0x0800, 8) // flags: UTF-8 filename
+  buf.writeUInt16LE(FLAGS, 8)
   buf.writeUInt16LE(0, 10) // method: stored
   buf.writeUInt16LE(entry.dosTime, 12)
   buf.writeUInt16LE(entry.dosDate, 14)
@@ -183,8 +245,8 @@ function centralHeader(entry: Entry): Buffer {
   entry.nameBytes.copy(buf, CENTRAL_HEADER)
 
   if (extraSize) {
-    // ZIP64 extra fields appear in a fixed order, and only for the fixed
-    // fields that were replaced by a 0xffffffff sentinel above.
+    // ZIP64 extra fields appear in a fixed order, and only for the fixed fields
+    // that were replaced by a 0xffffffff sentinel above.
     let at = CENTRAL_HEADER + entry.nameBytes.length
     buf.writeUInt16LE(0x0001, at)
     buf.writeUInt16LE(extraSize - 4, at + 2)
@@ -299,8 +361,8 @@ function dosDateTime(iso: string): { time: number; date: number } {
 let crcTable: Uint32Array | null = null
 
 /** zlib.crc32 landed in Node 20.15; fall back for older runtimes. */
-function crc32(buf: Buffer): number {
-  if (typeof zlib.crc32 === 'function') return zlib.crc32(buf)
+function crc32(buf: Buffer, seed = 0): number {
+  if (typeof zlib.crc32 === 'function') return zlib.crc32(buf, seed)
 
   if (!crcTable) {
     crcTable = new Uint32Array(256)
@@ -311,7 +373,7 @@ function crc32(buf: Buffer): number {
     }
   }
 
-  let crc = 0xffffffff
+  let crc = (seed ^ 0xffffffff) >>> 0
   for (let i = 0; i < buf.length; i++) {
     crc = crcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8)
   }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getFile, deleteFile } from '@/lib/file-store'
 import { fileEvents } from '@/lib/events'
+import { fileStream } from '@/lib/stream'
 
 export const runtime = 'nodejs'
 
@@ -15,7 +16,7 @@ export async function GET(_req: NextRequest, ctx: RouteContext<'/api/files/[id]'
   const safeName = file.name.replace(/[^\x20-\x7E]/g, '_')
   const encodedName = encodeURIComponent(file.name)
 
-  return new Response(new Uint8Array(file.buffer), {
+  return new Response(fileStream(file.path), {
     headers: {
       'Content-Type': file.type,
       'Content-Disposition': `attachment; filename="${safeName}"; filename*=UTF-8''${encodedName}`,
@@ -27,7 +28,7 @@ export async function GET(_req: NextRequest, ctx: RouteContext<'/api/files/[id]'
 
 export async function DELETE(_req: NextRequest, ctx: RouteContext<'/api/files/[id]'>) {
   const { id } = await ctx.params
-  const deleted = deleteFile(id)
+  const deleted = await deleteFile(id)
 
   if (!deleted) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 })

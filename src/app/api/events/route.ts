@@ -1,5 +1,6 @@
 import { fileEvents } from '@/lib/events'
 import { getAllFiles } from '@/lib/file-store'
+import { connectionOpened } from '@/lib/presence'
 import type { FileMetadata } from '@/lib/types'
 
 export const runtime = 'nodejs'
@@ -25,6 +26,8 @@ export async function GET() {
       fileEvents.on('file-added', onAdded)
       fileEvents.on('file-removed', onRemoved)
 
+      const releaseConnection = connectionOpened()
+
       const heartbeat = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(`:ping\n\n`))
@@ -38,6 +41,9 @@ export async function GET() {
         clearInterval(heartbeat)
         fileEvents.off('file-added', onAdded)
         fileEvents.off('file-removed', onRemoved)
+        // Reached from cancel() and from the heartbeat's failure path, so this
+        // has to tolerate running twice.
+        releaseConnection()
       }
 
       send('init', getAllFiles())

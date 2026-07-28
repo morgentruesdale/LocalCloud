@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { addFile, getAllFiles } from '@/lib/file-store'
 import { fileEvents } from '@/lib/events'
+import { scheduleCollect } from '@/lib/gc'
+import { scheduleEvictionIfIdle } from '@/lib/presence'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -51,21 +53,32 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  const results = await Promise.all(
-    files.map(async (file) => {
-      const buffer = Buffer.from(await file.arrayBuffer())
-      const meta = addFile({
-        name: file.name,
-        size: file.size,
-        type: file.type || 'application/octet-stream',
-        buffer,
-        uploadedAt: new Date().toISOString(),
-        uploaderIp: ip,
-      })
-      fileEvents.emit('file-added', meta)
-      return meta
-    }),
-  )
+  let results
+  try {
+    results = await Promise.all(
+      files.map(async (file) => {
+        const meta = await addFile({
+          name: file.name,
+          type: file.type || 'application/octet-stream',
+          uploadedAt: new Date().toISOString(),
+          uploaderIp: ip,
+          body: file.stream(),
+        })
+        fileEvents.emit('file-added', meta)
+        return meta
+      }),
+    )
+  } catch {
+    return NextResponse.json({ error: 'Failed to store upload' }, { status: 500 })
+  } finally {
+    // formData() materialises every uploaded body in memory before it reaches
+    // disk. Those buffers are garbage the moment the writes finish, but nothing
+    // would collect them for a long time without a nudge.
+    scheduleCollect()
+    // An upload can arrive with no dashboard open at all (a direct API call),
+    // which would otherwise leave the new files with no eviction armed.
+    scheduleEvictionIfIdle()
+  }
 
   return NextResponse.json(results, { status: 201 })
 }
