@@ -54,6 +54,17 @@ export default function FileList({ files, onDelete }: Props) {
         <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
           {files.length} {files.length === 1 ? 'file' : 'files'}
         </span>
+
+        <a
+          href="/api/archive"
+          download
+          className="flex items-center gap-1.5 px-2.5 py-1 -my-0.5 text-xs font-medium rounded-lg text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 transition-colors"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          Download all as zip
+        </a>
       </div>
 
       <ul className="divide-y divide-zinc-100 dark:divide-zinc-800">

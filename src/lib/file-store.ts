@@ -22,9 +22,13 @@ export function getFile(id: string): StoredFile | undefined {
 }
 
 export function getAllFiles(): FileMetadata[] {
-  return Array.from(store.values())
-    .map(toMetadata)
-    .sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime())
+  return getAllStoredFiles().map(toMetadata)
+}
+
+export function getAllStoredFiles(): StoredFile[] {
+  return Array.from(store.values()).sort(
+    (a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime(),
+  )
 }
 
 export function deleteFile(id: string): boolean {
