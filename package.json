@@ -1,13 +1,13 @@
 {
   "name": "localcloud",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev -p 10196",
     "build": "next build",
     "start": "next start -p 10196",
     "lint": "eslint",
-    "prepackage": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prepackage": "node scripts/package.mjs --clean",
     "package": "next build && node scripts/package.mjs"
   },
   "dependencies": {

@@ -44,6 +44,9 @@ if (args.includes('--help') || args.includes('-h')) {
                           Defaults to all.
   --node-version=<x.y.z>  Node runtime to bundle.
                           Defaults to this Node (${process.versions.node}).
+  --clean                 Empty ${OUT}/ and exit. Runs automatically before
+                          \`npm run package\`, so file tracing has no stale
+                          output to sweep into the build.
 
 Runtimes are downloaded from nodejs.org, verified against the official
 SHASUMS256.txt and kept in ${RUNTIMES_DIR}/ so later runs reuse them.`)
@@ -76,6 +79,11 @@ for (const arch of arches) {
 
 const versionArg = args.find((a) => a.startsWith('--node-version='))
 const nodeVersion = (versionArg?.split('=')[1] ?? process.versions.node).replace(/^v/, '')
+
+if (args.includes('--clean')) {
+  await cleanOutput()
+  process.exit(0)
+}
 
 if (!existsSync('.next/standalone')) {
   console.error('Error: .next/standalone not found. Run `npm run build` first.')
@@ -373,7 +381,7 @@ const LAUNCHERS = {
     '@echo off',
     'setlocal',
     'set HOSTNAME=0.0.0.0',
-    'set PORT=3000',
+    'set PORT=10196',
     'set "ARCH=x64"',
     'if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ARCH=arm64"',
     'set "NODE_BIN=%~dp0runtime\\win-%ARCH%\\node.exe"',
@@ -385,7 +393,7 @@ const LAUNCHERS = {
 
   'start.ps1': [
     '$env:HOSTNAME = "0.0.0.0"',
-    '$env:PORT = "3000"',
+    '$env:PORT = "10196"',
     "$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }",
     '$node = Join-Path $PSScriptRoot "runtime/win-$arch/node.exe"',
     "if (-not (Test-Path $node)) { $node = 'node' }",
@@ -397,7 +405,7 @@ const LAUNCHERS = {
     '#!/bin/sh',
     'DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)',
     'export HOSTNAME=0.0.0.0',
-    'export PORT=3000',
+    'export PORT=10196',
     'case "$(uname -s)" in',
     '  Darwin) OS=darwin ;;',
     '  *) OS=linux ;;',
@@ -430,6 +438,44 @@ const PAYLOAD = [
   ['.next/static', '/.next/static'],
   ...(existsSync('public') ? [['public', '/public']] : []),
 ]
+
+// Windows refuses to delete a directory while any process holds a handle on it,
+// and an open Explorer window is enough to trigger that. Only the stale files
+// actually matter - they are what output file tracing would otherwise sweep
+// into the next build - so an empty directory left behind is harmless, we write
+// straight back into it.
+async function cleanOutput() {
+  if (!existsSync(OUT)) return
+
+  const opts = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }
+  try {
+    await rm(OUT, opts)
+    return
+  } catch (err) {
+    if (!['EPERM', 'EBUSY', 'ENOTEMPTY'].includes(err.code)) throw err
+  }
+
+  const stuck = []
+  const stack = [OUT]
+  while (stack.length) {
+    for (const entry of await readdir(stack.pop(), { withFileTypes: true })) {
+      const abs = path.join(entry.parentPath, entry.name)
+      if (entry.isDirectory()) {
+        stack.push(abs)
+      } else {
+        await rm(abs, opts).catch(() => stuck.push(abs))
+      }
+    }
+  }
+
+  if (stuck.length) {
+    throw new Error(
+      `Could not delete ${stuck.length} file(s) under ${OUT}/:\n  ${stuck.slice(0, 5).join('\n  ')}\n` +
+        'Close whatever is using them - an open Explorer window, or a server still ' +
+        'running from an earlier package - and try again.',
+    )
+  }
+}
 
 async function buildPackage(platform) {
   const { targets, launchers } = PLATFORMS[platform]
@@ -467,7 +513,7 @@ async function buildPackage(platform) {
   return { zipPath, targets: wanted, size: (await stat(zipPath)).size }
 }
 
-await rm(OUT, { recursive: true, force: true })
+await cleanOutput()
 
 const built = []
 for (const platform of platforms) {
