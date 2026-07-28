@@ -1,4 +1,4 @@
-# LocalCloud
+# ☁️LocalCloud
 
 A local network, self-hosted file transfer server that is vastly more efficient and intuitive than network folder sharing for the average user. 
 Run it on one machine and any other device on the same network can upload and download files through a browser. 
